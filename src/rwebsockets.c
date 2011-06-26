@@ -10,6 +10,7 @@
 
 #include "private-libwebsockets.h"
 #include "libwebsockets.h"
+#include "websockets.h"
 
 #include <R.h>
 #define USE_RINTERNALS
@@ -167,7 +168,7 @@ SEXP wsockwrite(SEXP WSI, SEXP DATA)
   return ScalarInteger(n);
 }
 
-// Broadcast to protocol
+// "Broadcast" protocol
 SEXP wsockbcast(SEXP DATA)
 {
   unsigned char *p, *d;
@@ -179,7 +180,7 @@ SEXP wsockbcast(SEXP DATA)
                                 LWS_SEND_BUFFER_POST_PADDING, sizeof(char));
   p = buf + LWS_SEND_BUFFER_PRE_PADDING;
   memcpy(p, d, n);
-  n = libwebsockets_broadcast(&protocols[PROTOCOL_R],buf,n);
+  n = libwebsockets_broadcast(&protocols[PROTOCOL_R],p,n);
   free(buf);
   if(n<0) error("ERROR writing to socket\n");
   return ScalarInteger(n);
@@ -213,9 +214,9 @@ SEXP createContext(SEXP env, SEXP PORT)
   int opts = 0;
   const char *cert_path = 0;
   const char *key_path = 0;
-  const char * interface = 0;
+  const char *theinterface = 0;
   opts = LWS_SERVER_OPTION_DEFEAT_CLIENT_MASK;
-  context = libwebsocket_create_context(port, interface, protocols,
+  context = libwebsocket_create_context(port, theinterface, protocols,
               libwebsocket_internal_extensions,
               cert_path, key_path, -1, -1, opts);
   if(!context) return (R_NilValue);
