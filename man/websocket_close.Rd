@@ -1,18 +1,17 @@
-\name{websocket_write}
-\alias{websocket_write}
+\name{websocket_close}
+\alias{websocket_close}
 \title{
-websocket_write
+Close a websocket client connection.
 }
 \description{
-Write data to a websocket connection.
+Close a websocket client connection.
 }
 \usage{
-websocket_write(DATA, WS)
+websocket_close(connection)
 }
 \arguments{
-  \item{DATA}{A character string or RAW vector to write.}
-  \item{WS}{A websocket client from a websocket server environment or a
-callback function. See the 'details' section below for more information.}
+  \item{connection}{A websocket client. See the details section for more
+information.  }
 }
 \details{
 The \code{WS} argument must be a websocket client which is represented as
@@ -24,15 +23,14 @@ first client socket:
 \code{WS$client_sockets[[1]]}.
 }
 \value{
-The number of bytes sent or an error. A returned value of -1 indicates
-that the websocket client socket should be closed.
+An integer value returned by the underlying TCP socket close function
+which may vary in interpretation from system to system.
 }
 \author{
 B. W. Lewis <blewis@illposed.net>
 }
-
 \seealso{
-\code{\link{setCallback}}
+\code{\link{websocket_write}}
 }
 \examples{
 ##
