@@ -1,4 +1,4 @@
-/* Minimalist socket functions */
+/* Minimalist socket and websocket support functions */
 #include <stdio.h>
 #ifdef WIN32
 #include <winsock2.h>
@@ -21,6 +21,9 @@
 #include <Rinternals.h>
 #include <R_ext/Utils.h>
 #include <R_ext/Rdynload.h>
+#include <R_ext/Callbacks.h>
+#include <R_ext/eventloop.h>
+#include <R_ext/Parse.h>
 #include "libsock.h"
 
 #ifdef WIN32
@@ -279,20 +282,25 @@ SEXP SOCK_SEND(SEXP S, SEXP DATA)
 { 
   struct pollfd pfds;
   int h;
-  const void *data = (const void *)RAW(DATA);
   size_t len = (size_t)length(DATA);
   int s = INTEGER(S)[0];
+  int ts = 0,  // total sent
+      sent = 0;
   pfds.fd = s;
   pfds.events = POLLOUT;
-  h = poll(&pfds, 1, 500);
-  if(h<1) return ScalarInteger(-1);
-  if(pfds.events & POLLOUT)
+  while(ts < len) {
+    h = poll(&pfds, 1, 500);
+    if(h<1) return ScalarInteger(-1);
+    if(pfds.events & POLLOUT) {
 #ifdef WIN32
-    return ScalarInteger(send((SOCKET)s, data, len, 0));
+      sent = send((SOCKET)s, (const void *)&(RAW(DATA)[ts]), len-ts, 0);
 #else
-    return ScalarInteger(send(s, data, len, 0));
+      sent = send(s, (const void *)&(RAW(DATA)[ts]), len-ts, 0);
 #endif
-  return ScalarInteger(-1);
+      ts+=sent;
+    } else return ScalarInteger(-1);
+  }
+  return ScalarInteger(ts);
 }
 
 /* A generic recv wrapper function */
@@ -342,6 +350,7 @@ SEXP SOCK_RECV(SEXP S, SEXP EXT, SEXP BS, SEXP MAXBUFSIZE)
 /* return a pointer to the recv buffer */
     ans = R_MakeExternalPtr ((void *)msg, R_NilValue, R_NilValue);
     R_RegisterCFinalizer (ans, recv_finalize);
+    free(buf);
   }
   else {
 /* Copy to a raw vector */
@@ -349,6 +358,7 @@ SEXP SOCK_RECV(SEXP S, SEXP EXT, SEXP BS, SEXP MAXBUFSIZE)
     p = (char *)RAW(ans);
     memcpy((void *)p, (void *)msg, k);
     free(buf);
+    free(msg);
     UNPROTECT(1);
   }
   return ans;
@@ -513,7 +523,6 @@ SEXP SOCK_RECV_FRAME(SEXP S, SEXP EXT, SEXP MAXBUFSIZE)
     free(buf);
     return(ans);
   }
-//  if(j<len) fprintf(stderr,"Short read\n");
   len = len + 2 + l2 + l3;
   if(INTEGER(EXT)[0]) {
 /* return a pointer to the recv buffer */
@@ -624,5 +633,86 @@ SEXP SOCK_RECV_HTTP_HEAD(SEXP S)
   memcpy((void *)p, (void *)buf, k);
   free(buf);
   UNPROTECT(1);
+  return ans;
+}
+
+/* Receive a message of exactly length N, or until error on socket. */
+SEXP SOCK_RECV_N(SEXP S, SEXP N)
+{
+  SEXP ans = R_NilValue;
+  char c;
+  char *buf, *p;
+  struct pollfd pfds;
+  int h, j, k;
+  int n = INTEGER(N)[0];
+#ifdef WIN32
+  SOCKET s = (SOCKET)INTEGER(S)[0];
+#else
+  int s = INTEGER(S)[0];
+#endif
+  buf = (char *)malloc(n);
+  p = buf;
+  k = 0;
+
+  pfds.fd = s;
+  pfds.events = POLLIN;
+  h = poll(&pfds, 1, 50);
+  while(h>0) {
+    j = recv(s, p, n-k, 0);
+    if(j<1) break;
+    k+=j;
+    p+=j;
+    if(k > n) {
+      break;
+    }
+    h = poll(&pfds, 1, 50);
+  }
+  PROTECT(ans=allocVector(RAWSXP,k));
+  p = (char *)RAW(ans);
+  memcpy((void *)p, (void *)buf, k);
+  free(buf);
+  UNPROTECT(1);
+  return ans;
+}
+
+static void service_handler()
+{
+  R_len_t i;
+  ParseStatus status;
+  SEXP EXPR, CMD, ans = R_NilValue;
+  PROTECT(EXPR = allocVector(STRSXP, 1));
+  SET_STRING_ELT(EXPR,0,mkChar("websockets:::.websocket_daemon()"));
+  CMD = PROTECT(R_ParseVector(EXPR, -1, &status, R_NilValue));
+  if(status != PARSE_OK) {
+    UNPROTECT(2);
+    return;
+  }
+  for(i=0;i<length(CMD);++i) {
+    ans = eval(VECTOR_ELT(CMD,i),R_GlobalEnv);
+  }
+  UNPROTECT(2);
+}
+
+static void finalize_handler(SEXP HANDLER)
+{
+  int j;
+  InputHandler *handler = (InputHandler *)R_ExternalPtrAddr(HANDLER);
+  j = removeInputHandler(&R_InputHandlers, handler);
+}
+
+SEXP DEREG_EVENT_HANDLER(SEXP HANDLER)
+{
+  finalize_handler(HANDLER);
+  return R_NilValue;
+}
+
+SEXP REG_EVENT_HANDLER(SEXP FD)
+{
+  int fd =  INTEGER(FD)[0];
+  SEXP R_fcall;
+  SEXP ans;
+  static InputHandler *handler;
+  handler = addInputHandler(R_InputHandlers,fd,&service_handler,55);
+  ans = R_MakeExternalPtr ((void *)handler, R_NilValue, R_NilValue);
   return ans;
 }

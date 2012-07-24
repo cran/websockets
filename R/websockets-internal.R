@@ -1,15 +1,55 @@
 # Notes:
-# - no extensions
-# - subprotocol is ignored for now
-# - fragmentation is not supported yet
+# This is a basic implementation of the Websockets protocol.
+# - no websocket extensions
+# - subprotocol is ignored
+# - fragmentation is not supported
 
 .onLoad = function(libname,pkgname)
 {
   options(websockets_max_buffer_size=16777216)
 }
+
 .onUnload = function(libpath)
 {
   options(websockets_max_buffer_size=NULL)
+}
+
+# A place to store misc. package state. We bolted on a lot of functions,
+# while also maintaining backwards-compatability with older package versions.
+# This is the unfortunate result.
+.websockets_env = new.env()
+
+# The event handler will evaluate 'websockets_event_handler()' in the global
+# environment with activity on the file descriptor.  It returns an external
+# pointer reference, a function pointer to an internal handler function. The
+# pointer does not need to be de-allocated.
+.register_event_handler = function(fd)
+{
+  .Call("REG_EVENT_HANDLER",as.integer(fd),.package="websockets")
+}
+.deregister_event_handler = function(handler)
+{
+  .Call("DEREG_EVENT_HANDLER",handler,.package="websockets")
+}
+
+# This is a generic daemon function that services all daemonized
+# servers and their client connections. It's called by event handlers
+# registered on the server and client sockets.
+.websocket_daemon = function()
+{
+  if(exists("server_list",envir=.websockets_env))
+    for(j in .websockets_env$server_list) service(j, timeout=10L)
+}
+
+# Remove a server from the daemon watch list
+.undaemon = function(server)
+{
+  socks = sapply(.websockets_env$server_list, function(x) x$server_socket)
+  if(length(socks)>0) {
+    .websockets_env$server_list = 
+      .websockets_env$server_list[!(socks == server$server_socket)]
+  }
+  invisible()
 }
 
 # numToBits can convert large integers to bits.
@@ -120,7 +160,8 @@
   resp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: WebSocket\r\nConnection: Upgrade\r\n"
   resp = paste(resp,"Sec-WebSocket-Origin: ",origin,"\r\n",sep="")
   resp = paste(resp,"Sec-WebSocket-Location: ",location,"\r\n",sep="")
-  resp = paste(resp,"Sec-WebSocket-Protocol: ",prot,"\r\n\r\n",sep="")
+  if (!is.null(prot))
+    resp = paste(resp,"Sec-WebSocket-Protocol: ",prot,"\r\n\r\n",sep="")
   c(charToRaw(resp),hash)
 }
 
@@ -132,7 +173,8 @@
   skey = base64encode(digest(charToRaw(key),algo='sha1',serialize=FALSE,raw=TRUE))
   prot = cli_header["Sec-WebSocket-Protocol"][[1]]
   resp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
-  resp = paste(resp,"Sec-WebSocket-Protocol: ",prot,"\r\n",sep="")
+  if (!is.null(prot))
+    resp = paste(resp,"Sec-WebSocket-Protocol: ",prot,"\r\n",sep="")
   paste(resp,"Sec-WebSocket-Accept: ",skey,"\r\n\r\n",sep="")
 }
 
@@ -143,8 +185,8 @@
 {
   if(is.character(opcode)) opcode = strtoi(opcode, 16L)
   head = rawToBits(raw(1))    # First byte of header
-  if(FIN) head[1] = as.raw(1)
-  head[5:8] = rawToBits(as.raw(opcode))[4:1]
+  if(FIN) head[8] = as.raw(1)
+  head[1:4] = rawToBits(as.raw(opcode))[1:4]
   head2 = rawToBits(raw(1))    # 2nd byte of header
   rest  = raw(0)              # Optional 3rd -- 6th bytes
   if(mask) head2[8] = as.raw(1)
@@ -241,22 +283,29 @@
   return(list(header=frame,data=data[frame$offset:(frame$len + frame$offset - 1)]))
 }
 
-`.add_client` <- function(socket, server)
+`.add_client` = function(socket, server)
 {
-  cs <- .SOCK_ACCEPT(socket)
+  cs = .SOCK_ACCEPT(socket)
+# Check to see if an event handler exists for this server. If so,
+# register an event handler for the client socket too.
+  handler = NULL
+  if(exists("handler",envir=server) && !is.null(server$handler))
+  {
+    handler = .register_event_handler(cs)
+  }
   client_sockets = server$client_sockets
-#  client_sockets[[length(client_sockets)+1]] =
   client_sockets[[as.character(cs)]] = 
-    list(socket=cs, wsinfo=NULL, server=server, new=TRUE)
+    list(socket=cs, wsinfo=NULL, server=server, new=TRUE, handler=handler)
   assign('client_sockets',client_sockets, envir=server)
   invisible()
 }
 
-`.remove_client` <- function(socket)
+`.remove_client` = function(socket)
 {
-  server <- socket$server
-  cs <- socket$server$client_sockets
-#  cs <- cs[!(unlist(lapply(cs,function(x) x$socket)) == socket$socket)]
+  server = socket$server
+  if(!is.null(socket$handler)) .deregister_event_handler(socket$handler)
+  socket$hander = NULL
+  cs = socket$server$client_sockets
   cs[[as.character(socket$socket)]] = c()
   j = .SOCK_CLOSE(socket$socket)
   assign('client_sockets',cs, envir=server)
@@ -269,6 +318,7 @@
 .http_400 = function(socket)
 {
   .SOCK_SEND(socket,charToRaw("HTTP/1.1 400 BAD REQUEST\r\n\r\n<!DOCTYPE html><html><body><h1>400 Bad request.</h1></body></html>"))
+  TRUE
 }
 
 # Generic, very basic 200 response.
@@ -281,7 +331,7 @@
                     content="<html><body><h1>R Websocket Server</h1></body></html>")
 {
   n = ifelse(is.character(content),nchar(content), length(content))
-  h="HTTP/1.1 200 OK\r\nServer: R/Websocket"
+  h="HTTP/1.1 200 OK\r\nServer: R/Websocket\r\n"
   h=paste(h,"Content-Type: ",content_type, "\r\n",sep="")
   h=paste(h,"Date: ",date(),"\r\n",sep="")
   h=paste(h,"Content-Length: ",n,"\r\n\r\n",sep="")
@@ -291,39 +341,9 @@
   else
     .SOCK_SEND(socket,content)
   .SOCK_CLOSE(socket)
+  TRUE
 }
 
-# A basic and generic http response function
-http_response = function(socket, status=200, content_type="text/html; charset=UTF-8", content="")
-{
-  n = ifelse(is.character(content),nchar(content), length(content))
-  h=paste("HTTP/1.1",status,"OK\r\nServer: R/Websocket")
-  h=paste(h,"Content-Type: ",content_type, "\r\n",sep="")
-  h=paste(h,"Date: ",date(),"\r\n",sep="")
-  h=paste(h,"Content-Length: ",n,"\r\n\r\n",sep="")
-  .SOCK_SEND(socket,charToRaw(h))
-  if(is.character(content))
-    .SOCK_SEND(socket,charToRaw(content))
-  else
-    .SOCK_SEND(socket,content)
-  .SOCK_CLOSE(socket)
-}
-
-# Parse http get/post variables, returning a list
-http_vars = function(socket, header)
-{
-  res = strsplit(header$RESOURCE,split="\\?")[[1]]
-  if(header$TYPE=="POST")
-    GET = rawToChar(websockets:::.SOCK_RECV_HTTP_HEAD(socket))
-  else GET = res[2]
-  if(!is.na(GET) && nchar(GET)>1) {
-    GET = lapply(strsplit(GET,"&")[[1]],function(x) strsplit(x,"=")[[1]])
-    gnams = lapply(GET,function(x) x[[1]])
-    GET = lapply(GET,function(x) .urldecode(x[[2]]))
-    names(GET) = gnams
-  } else GET = c()
-  GET
-}
 
 .urldecode = function(x)
 {
