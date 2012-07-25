@@ -1,4 +1,4 @@
-cd4d1ccedecdd55a68bf465fccb5efb3 *DESCRIPTION
+72fda2282088c95f8f700356be518123 *DESCRIPTION
 f7abd861ce1d570cccfc0cbc3e1136a4 *NAMESPACE
 ee68b7cb4b4c2016be55dcd357f042f7 *NEWS
 ff51fefccee967298a50ea5bc60be2e7 *R/libsock.R
@@ -7,10 +7,10 @@ dfc9e3aaff348eba090956fc6fa5f826 *R/websockets-internal.R
 67f061cd2497efe6a32897cc38df46d8 *README
 39784dd30d0dd317875ab1e1c4d5c7a7 *demo/00Index
 de3a9e373416a0985a02a85b5c9af398 *demo/fortunes.R
-b4188c84d66e7be50ba0a310d5e11cb6 *demo/websockets.R
+cf20a8df23b82c76b9c56f3665bf98d5 *demo/websockets.R
 556376d1218a01d8597e501322ccb9ea *inst/basic.html
 01a2ce2678c02bcbcc570fc8818d0c3a *inst/doc/websockets.Rnw
-c3542e84df8ebcec64496695e7699751 *inst/doc/websockets.pdf
+86dc653c08598c5ce36d563f177908cb *inst/doc/websockets.pdf
 d1e491a6822182efadd3dec9e2f203a9 *man/create_server.Rd
 515d6a7afa2e94292d164cea583ce7a9 *man/daemonize.Rd
 0aeac8a11595ab4b54ad102a01dcaad5 *man/http_response.Rd
@@ -27,5 +27,5 @@ b01711ca932d3716043fa02063abfd2e *man/websocket_write.Rd
 8aebb1fadd84a1da13174110bcf3b565 *man/websockets-package.Rd
 07e53222e599194b5270cce86b656e67 *src/Makevars
 7a5d618aa2dd17c23faef1494404cd0d *src/Makevars.win
-edd8d6a61f64e8de05a030d3ab16c8c4 *src/libsock.c
+2091996f2caf5c0d6fd0e961dad9d279 *src/libsock.c
 50a182e8e0d0464d419ad10e78a353cc *src/libsock.h
