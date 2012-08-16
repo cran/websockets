@@ -27,6 +27,7 @@
 #include <R_ext/Parse.h>
 #endif
 #include "libsock.h"
+#include <errno.h>
 
 #ifdef WIN32
 WSADATA wsaData;
@@ -73,6 +74,7 @@ tcpserv (int lport)
   s = socket (AF_INET, SOCK_STREAM, 0);
   if (s == INVALID_SOCKET)
     {
+      warning("R-Websockets(tcpserv): socket() failed");
       return -1;
     } 
   n = 1;
@@ -84,6 +86,7 @@ tcpserv (int lport)
 #else
       close (s);
 #endif
+      warning("R-Websockets(tcpserv): setsockopt() failed");
       return -1;
     }
   if (bind (s, (struct sockaddr *) &sin, sizeof (sin)) < 0)
@@ -93,6 +96,7 @@ tcpserv (int lport)
 #else
       close (s);
 #endif
+      warning("R-Websockets(tcpserv): bind() failed");
       return -1;
     }
   if (listen (s, BACKLOG) < 0)
@@ -102,6 +106,7 @@ tcpserv (int lport)
 #else
       close (s);
 #endif
+      warning("R-Websockets(tcpserv): listen() failed");
       return -1;
     }
 #ifdef WIN32
@@ -111,10 +116,12 @@ tcpserv (int lport)
     if(fcntl(s, F_SETFL, O_NONBLOCK) < 0)
      {
        close(s);
+       warning("R-Websockets(tcpserv): fcntl() failed");
        return -1;
      }
     signal(SIGPIPE, SIG_IGN);
 #endif
+
   return (int)s;
 }
 
@@ -219,7 +226,7 @@ SEXP SOCK_ACCEPT (SEXP S)
   return ScalarInteger(accept((SOCKET)INTEGER(S)[0], 0,0));
 #else
   struct sockaddr_in sa;
-  socklen_t slen;
+  socklen_t slen = sizeof(sa);
   memset(&sa, 0, sizeof (sa));
   return ScalarInteger(accept(INTEGER(S)[0], (struct sockaddr*)&sa, &slen));
 #endif
@@ -445,8 +452,32 @@ mingw_poll (struct pollfd *fds, unsigned int nfds, int timo)
 #endif
 
 
-/* Receive exactly one non-00 protocol frame */
-SEXP SOCK_RECV_FRAME(SEXP S, SEXP EXT, SEXP MAXBUFSIZE)
+// Receive exactly one non-00 protocol frame, unmasking data
+// if necessary.
+//
+// Returns a list with the following structure:
+//
+//  List of 2
+//   $ data  : raw [1:99] 7b 22 6d 65 ...
+//   $ header:List of 5
+//    ..$ fin   : logi TRUE
+//    ..$ rsv1  : logi FALSE
+//    ..$ rsv2  : logi FALSE
+//    ..$ rsv3  : logi FALSE
+//    ..$ opcode: int 1
+//
+// The bit ordering is hard to follow for the first two bytes, so here's
+// an explanation. The index at the top of the frame denotes the bit order.
+//
+//   8 7 6 5 4 3 2 1 8 7 6 5 4 3 2 1
+//  +-+-+-+-+-------+-+-------------+
+//  |F|R|R|R| opcode|M| Payload len |
+//  |I|S|S|S|  (4)  |A|     (7)     |
+//  |N|V|V|V|       |S|             |
+//  | |1|2|3|       |K|             |
+//  +-+-+-+-+-------+-+-------------+
+//
+SEXP SOCK_RECV_FRAME(SEXP S, SEXP MAXBUFSIZE)
 {
   SEXP ans = R_NilValue;
   char *buf, *p;
@@ -454,17 +485,16 @@ SEXP SOCK_RECV_FRAME(SEXP S, SEXP EXT, SEXP MAXBUFSIZE)
   unsigned char h2[8];  // extended payload length
   unsigned char h3[4];  // masking key
   unsigned char c;
-  unsigned long long len, l;
-  int mask;
+  unsigned long long j, len, l;
+  int masked, fin, rsv1, rsv2, rsv3, opcode;
   struct pollfd pfds;
-  unsigned int j;
+
 #ifdef WIN32
   SOCKET s = (SOCKET)INTEGER(S)[0];
 #else
   int s = INTEGER(S)[0];
 #endif
   double maxbufsize = REAL(MAXBUFSIZE)[0];
-  int l2=0, l3=0;
 
   pfds.fd = s;
   pfds.events = POLLIN;
@@ -472,16 +502,23 @@ SEXP SOCK_RECV_FRAME(SEXP S, SEXP EXT, SEXP MAXBUFSIZE)
   memset(h1,0,2);
   j = recv(s, (char *)h1, 2, 0);
   if(j<2) return ans;
-  mask = (h1[1] & (1 << 7))>0;
+  
+  fin = (h1[0] & (1 << 7))>0;
+  rsv1 = (h1[0] & (1 << 6))>0;
+  rsv2 = (h1[0] & (1 << 5))>0;
+  rsv3 = (h1[0] & (1 << 4))>0;
+  opcode = (h1[0] & 0x0f);
+
+  masked = (h1[1] & (1 << 7))>0;
   c = h1[1] & ~(1 << 7);
   j = c;
+
   if(j==126) {
     memset(h2,0,8);
     if(poll(&pfds, 1, 50)<1) return ans;
     j = recv(s, (char *)h2, 2, 0);
     if(j<2) return ans;
     len = 256 * (unsigned int)h2[0] + (unsigned int)h2[1];
-    l2 = 2;
   } else if (j==127) {
     memset(h2,0,8);
     if(poll(&pfds, 1, 50)<1) return ans;
@@ -496,54 +533,105 @@ SEXP SOCK_RECV_FRAME(SEXP S, SEXP EXT, SEXP MAXBUFSIZE)
     l = h2[2]; l = l << 40; len+=l;
     l = h2[1]; l = l << 48; len+=l;
     l = h2[0]; l = l << 56; len+=l;
-    l2 = 8;
   } else len = j;
   if(len>maxbufsize) {
     warning("Maxmimum message size exceeded.");
     len = maxbufsize;
   }
-  if(mask){
+  if(masked){
     memset(h3,0,4);
     if(poll(&pfds, 1, 50)<1) return ans;
     j = recv(s, (char *)h3, 4, 0);
     if(j<4) return ans;
-    l3 = 4;
   }
-  buf = (char *)malloc(2 + l2 + l3 + len);
+
+  /* printf("fin=%1d,rsv1=%1d,rsv2=%1d,rsv3=%1d,opcode=%1d,len=%llu\n",
+        fin,rsv1,rsv2,rsv3,opcode,len); */
+
+  buf = (char *)malloc(len);
   p = buf;
-  memcpy(p, h1, 2); p+=2;
-  if(l2>0) memcpy(p, h2, l2); p+=l2;
-  if(l3>0) memcpy(p, h3, l3); p+=l3;
-  j = (unsigned int)len;
-// XXX can fail here, need nonblocking
-  if(poll(&pfds, 1, 50)<1){
-    free(buf);
-    return(ans);
-  }
-  j = recv(s, (char *)p, len, 0);
-  if(j<1) {
-    free(buf);
-    return(ans);
-  }
-  len = len + 2 + l2 + l3;
-  if(INTEGER(EXT)[0]) {
-/* return a pointer to the recv buffer */
-    ans = R_MakeExternalPtr ((void *)buf, R_NilValue, R_NilValue);
-    R_RegisterCFinalizer (ans, recv_finalize);
-  }
-  else {
-/* Copy to a raw vector */
-    PROTECT(ans=allocVector(RAWSXP,len));
-    p = (char *)RAW(ans);
+
+  j = l = 0;
+  // XXX can fail here, need nonblocking
+  do {
+    if(poll(&pfds, 1, 50)<1){
+      free(buf);
+      return(ans);
+    }
+    j = recv(s, (char *)p+l, len, 0);
+    if(j<1) {
+      free(buf);
+      return(ans);
+    }
+    l += j;
+  } while(l < len);
+
+  if (masked) mask(len,buf,(char *)h3);
+
+  {
+    SEXP ansN, hdr, hdrN, val;
+
+    PROTECT(ans  = allocVector(VECSXP,2));
+    PROTECT(ansN = allocVector(STRSXP,2));
+    PROTECT(hdr  = allocVector(VECSXP,5));
+    PROTECT(hdrN = allocVector(STRSXP,5));
+
+    // Fill header
+    PROTECT(val = allocVector(LGLSXP,1));
+    LOGICAL(val)[0] = fin;
+    SET_VECTOR_ELT(hdr,0,val);
+    SET_STRING_ELT(hdrN,0,mkChar("fin"));
+    UNPROTECT(1);
+
+    PROTECT(val = allocVector(LGLSXP,1));
+    LOGICAL(val)[0] = rsv1;
+    SET_VECTOR_ELT(hdr,1,val);
+    SET_STRING_ELT(hdrN,1,mkChar("rsv1"));
+    UNPROTECT(1);
+
+    PROTECT(val = allocVector(LGLSXP,1));
+    LOGICAL(val)[0] = rsv2;
+    SET_VECTOR_ELT(hdr,2,val);
+    SET_STRING_ELT(hdrN,2,mkChar("rsv2"));
+    UNPROTECT(1);
+
+    PROTECT(val = allocVector(LGLSXP,1));
+    LOGICAL(val)[0] = rsv3;
+    SET_VECTOR_ELT(hdr,3,val);
+    SET_STRING_ELT(hdrN,3,mkChar("rsv3"));
+    UNPROTECT(1);
+
+    PROTECT(val = allocVector(INTSXP,1));
+    INTEGER(val)[0] = opcode;
+    SET_VECTOR_ELT(hdr,4,val);
+    SET_STRING_ELT(hdrN,4,mkChar("opcode"));
+    UNPROTECT(1);
+
+    setAttrib(hdr,R_NamesSymbol,hdrN);
+
+    // Fill data
+    PROTECT(val=allocVector(RAWSXP,len));
+    p = (char *)RAW(val);
     memcpy((void *)p, (void *)buf, len);
     free(buf);
     UNPROTECT(1);
+
+    // ans
+    SET_VECTOR_ELT(ans,0,val);
+    SET_STRING_ELT(ansN,0,mkChar("data"));
+    SET_VECTOR_ELT(ans,1,hdr);
+    SET_STRING_ELT(ansN,1,mkChar("header"));
+
+    setAttrib(ans,R_NamesSymbol,ansN);
+
+    UNPROTECT(4);
   }
+
   return ans;
 }
 
 /* Receive exactly one 00 protocol frame, damned inefficiently.  */
-SEXP SOCK_RECV_FRAME00(SEXP S, SEXP EXT, SEXP MAXBUFSIZE)
+SEXP SOCK_RECV_FRAME00(SEXP S, SEXP MAXBUFSIZE)
 {
   SEXP ans = R_NilValue;
   char c;
@@ -579,19 +667,14 @@ SEXP SOCK_RECV_FRAME00(SEXP S, SEXP EXT, SEXP MAXBUFSIZE)
     }
     h = poll(&pfds, 1, 50);
   }
-  if(INTEGER(EXT)[0]) {
-/* return a pointer to the recv buffer */
-    ans = R_MakeExternalPtr ((void *)buf, R_NilValue, R_NilValue);
-    R_RegisterCFinalizer (ans, recv_finalize);
-  }
-  else {
-/* Copy to a raw vector */
-    PROTECT(ans=allocVector(RAWSXP,k));
-    p = (char *)RAW(ans);
-    memcpy((void *)p, (void *)buf, k);
-    free(buf);
-    UNPROTECT(1);
-  }
+
+  /* Copy to a raw vector */
+  PROTECT(ans=allocVector(RAWSXP,k));
+  p = (char *)RAW(ans);
+  memcpy((void *)p, (void *)buf, k);
+  free(buf);
+  UNPROTECT(1);
+
   return ans;
 }
 
@@ -642,7 +725,6 @@ SEXP SOCK_RECV_HTTP_HEAD(SEXP S)
 SEXP SOCK_RECV_N(SEXP S, SEXP N)
 {
   SEXP ans = R_NilValue;
-  char c;
   char *buf, *p;
   struct pollfd pfds;
   int h, j, k;
@@ -682,7 +764,7 @@ static void service_handler()
 {
   R_len_t i;
   ParseStatus status;
-  SEXP EXPR, CMD, ans = R_NilValue;
+  SEXP EXPR, CMD;
   PROTECT(EXPR = allocVector(STRSXP, 1));
   SET_STRING_ELT(EXPR,0,mkChar("websockets:::.websocket_daemon()"));
   CMD = PROTECT(R_ParseVector(EXPR, -1, &status, R_NilValue));
@@ -691,16 +773,16 @@ static void service_handler()
     return;
   }
   for(i=0;i<length(CMD);++i) {
-    ans = eval(VECTOR_ELT(CMD,i),R_GlobalEnv);
+    /* ans = eval(VECTOR_ELT(CMD,i),R_GlobalEnv); */
+    eval(VECTOR_ELT(CMD,i),R_GlobalEnv);
   }
   UNPROTECT(2);
 }
 
 static void finalize_handler(SEXP HANDLER)
 {
-  int j;
   InputHandler *handler = (InputHandler *)R_ExternalPtrAddr(HANDLER);
-  j = removeInputHandler(&R_InputHandlers, handler);
+  removeInputHandler(&R_InputHandlers, handler);
 }
 
 SEXP DEREG_EVENT_HANDLER(SEXP HANDLER)
@@ -712,7 +794,6 @@ SEXP DEREG_EVENT_HANDLER(SEXP HANDLER)
 SEXP REG_EVENT_HANDLER(SEXP FD)
 {
   int fd =  INTEGER(FD)[0];
-  SEXP R_fcall;
   SEXP ans;
   static InputHandler *handler;
   handler = addInputHandler(R_InputHandlers,fd,&service_handler,55);
