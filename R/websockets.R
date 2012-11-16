@@ -82,13 +82,9 @@ static_file_service = function(fn)
       file_content <<- paste(readLines(f),collapse="\n")
       close(f)
     }
-    if(is.null(header$RESOURCE)) return(.http_400(socket))
-    if(header$RESOURCE == "/favicon.ico") {
-      .http_200(socket,"image/x-icon",.html5ico)
-    }
-    else {
-      .http_200(socket,content=file_content)
-    }
+    if(is.null(header$RESOURCE))
+      return(.http_400(socket))
+    .http_200(socket,content=file_content)
     return(TRUE)
   }
 }
@@ -98,13 +94,9 @@ static_file_service = function(fn)
 static_text_service = function(text)
 {
   function(socket, header) {
-    if(is.null(header$RESOURCE)) return(.http_400(socket))
-    if(header$RESOURCE == "/favicon.ico") {
-      .http_200(socket,"image/x-icon",.html5ico)
-    }
-    else {
-      .http_200(socket,content=text)
-    }
+    if(is.null(header$RESOURCE))
+      return(.http_400(socket))
+    .http_200(socket,content=text)
     return(TRUE)
   }
 }
@@ -482,12 +474,25 @@ http_vars = function(socket, header)
 
 # A basic and generic http response function
 http_response = function(socket, status=200,
-                         content_type="text/html; charset=UTF-8", content="")
+                         content_type="text/html; charset=UTF-8", content="",
+                         headers=c())
 {
   n = ifelse(is.character(content),nchar(content), length(content))
   h=paste("HTTP/1.1",status,"OK\r\nServer: R/Websocket\r\n")
   h=paste(h,"Content-Type: ",content_type, "\r\n",sep="")
   h=paste(h,"Date: ",date(),"\r\n",sep="")
+  if (length(headers) > 0)
+  {
+    if (any(names(headers) == '') ||
+          any(grepl('[^a-zA-Z0-9-]', names(headers))) || 
+          any(grepl('\n', headers)))
+      stop("Invalid header argument passed to http_response")
+    
+    for (name in names(headers))
+    {
+      h=paste(h, name, ": ", headers[[name]], "\r\n", sep="")
+    }
+  }
   h=paste(h,"Content-Length: ",n,"\r\n\r\n",sep="")
   .SOCK_SEND(socket,charToRaw(h))
   if(is.character(content))
